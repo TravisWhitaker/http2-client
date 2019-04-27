@@ -419,10 +419,11 @@ initHttp2Client conn encoderBufSize decoderBufSize goAwayHandler fallbackHandler
                                             goAwayHandler
                                             fallbackHandler
 
-    let baseWindowSize = return HTTP2.defaultInitialWindowSize
-    _initIncomingFlowControl <- lift $ newIncomingFlowControl dispatchControl baseWindowSize (sendWindowUpdateFrame controlStream)
+    let baseIncomingWindowSize = initialWindowSize . _clientSettings <$> readSettings dispatchControl
+    let baseOutgoingWindowSize = initialWindowSize . _serverSettings <$> readSettings dispatchControl
+    _initIncomingFlowControl <- lift $ newIncomingFlowControl dispatchControl baseIncomingWindowSize (sendWindowUpdateFrame controlStream)
     windowUpdatesChan <- newChan
-    _initOutgoingFlowControl <- lift $ newOutgoingFlowControl dispatchControl windowUpdatesChan baseWindowSize
+    _initOutgoingFlowControl <- lift $ newOutgoingFlowControl dispatchControl windowUpdatesChan baseOutgoingWindowSize
 
     dispatchHPACK <- newDispatchHPACKIO decoderBufSize
     (incomingLoop,endIncomingLoop) <- dispatchLoop conn dispatch dispatchControl windowUpdatesChan _initIncomingFlowControl dispatchHPACK
@@ -788,16 +789,23 @@ newOutgoingFlowControl control frames getBase = do
     let receive n = atomicModifyIORef' credit (\c -> (c + n, ()))
     let withdraw 0 = return 0
         withdraw n = do
+            liftIO $ putStrLn "Withdrawing credit, about to get base."
             base <- lift getBase
+            liftIO $ putStrLn "Got base, about to atomicModifyIORef."
             got <- atomicModifyIORef' credit (\c ->
                     if base + c >= n
                     then (c - n, n)
                     else (0 - base, base + c))
+            liftIO $ putStrLn "Atomic finished."
             if got > 0
-            then return got
+            then liftIO (putStrLn ("Got " ++ show got)) *> return got
             else do
-                amount <- race (waitSettingsChange base) (waitSomeCredit frames)
+                liftIO $ putStrLn "Racing amount."
+                amount <- liftIO $ race (waitSettingsChange base) (waitSomeCredit frames)
+                liftIO $ putStrLn ("Got race amount " ++ show amount)
+                liftIO $ putStrLn "Receiving."
                 receive (either (const 0) id amount)
+                liftIO $ putStrLn "Received, withdraw again."
                 withdraw n
     return $ OutgoingFlowControl receive withdraw
   where
@@ -809,10 +817,17 @@ newOutgoingFlowControl control frames getBase = do
     -- an hasted client asks for X > initialWindowSize before the server has
     -- sent its initial SETTINGS frame.
     waitSettingsChange prev = do
+            liftIO $ putStrLn "waitSettingsChange reading settings."
             new <- initialWindowSize . _serverSettings <$> readSettings control
-            if new == prev then threadDelay 1000000 >> waitSettingsChange prev else return ()
+            if new == prev then do liftIO $ putStrLn "Wait a second, then try again..."
+                                   threadDelay 1000000
+                                   liftIO $ putStrLn "Trying again."
+                                   waitSettingsChange prev
+                           else putStrLn "settings changed" *> return ()
     waitSomeCredit frames = do
+        liftIO $ putStrLn "waitSomeCredit reading chan."
         got <- readChan frames
+        liftIO $ putStrLn "Chan read, check WindowUpdateFrame."
         case got of
             (_, WindowUpdateFrame amt) ->
                 return amt
