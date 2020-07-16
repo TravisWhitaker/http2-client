@@ -66,6 +66,11 @@ import           Network.HTTP2.Client.Dispatch
 import           Network.HTTP2.Client.Exceptions
 import           Network.HTTP2.Client.FrameConnection
 
+import Debug.Trace
+import System.IO
+
+aaah = liftIO . hPutStrLn stderr
+
 -- | Offers credit-based flow-control.
 --
 -- Any mutable changes are atomic and hence work as intended in a multithreaded
@@ -756,9 +761,9 @@ newIncomingFlowControl
 newIncomingFlowControl control getBase doSendUpdate = do
     creditAdded <- newIORef 0
     creditConsumed <- newIORef 0
-    let _addCredit n = atomicModifyIORef' creditAdded (\c -> (c + n, ()))
+    let _addCredit n = atomicModifyIORef' creditAdded (\c -> trace ("addCredit: had " <> show c <> ", now have " <> show (c + n)) (c + n, ()))
     let _consumeCredit n = do
-            conso <- atomicModifyIORef' creditConsumed (\c -> (c + n, c + n))
+            conso <- atomicModifyIORef' creditConsumed (\c -> trace ("consumeCredit: had " <> show c <> ", now have " <> show (c + n)) (c + n, c + n))
             base <- getBase
             extra <- readIORef creditAdded
             return $ base + extra - conso
@@ -786,18 +791,21 @@ newOutgoingFlowControl ::
   -> IO OutgoingFlowControl
 newOutgoingFlowControl control frames getBase = do
     credit <- newIORef 0
-    let receive n = atomicModifyIORef' credit (\c -> (c + n, ()))
+    let receive n = atomicModifyIORef' credit (\c -> trace ("receiveCredit: had " <> show c <> ", now have " <> show (c + n)) (c + n, ()))
     let withdraw 0 = return 0
         withdraw n = do
             base <- lift getBase
+            aaah ("withdraw: base = " <> show base)
             got <- atomicModifyIORef' credit (\c ->
                     if base + c >= n
                     then (c - n, n)
                     else (0 - base, base + c))
+            aaah ("withdraw: got = " <> show base)
             if got > 0
             then return got
             else do
                 amount <- race (waitSettingsChange base) (waitSomeCredit frames)
+                aaah ("withdraw: got amount " <> show amount)
                 receive (either (const 0) id amount)
                 withdraw n
     return $ OutgoingFlowControl receive withdraw
