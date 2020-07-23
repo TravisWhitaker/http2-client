@@ -777,7 +777,7 @@ newIncomingFlowControl control getBase doSendUpdate = do
 
             _addCredit (negate transferred)
             _ <- lift $ _consumeCredit (negate transferred)
-            when shouldUpdate (doSendUpdate transferred)
+            when shouldUpdate (trace "doSendUpdate" (doSendUpdate transferred))
 
             return shouldUpdate
     return $ IncomingFlowControl _addCredit _consumeCredit _updateWindow
